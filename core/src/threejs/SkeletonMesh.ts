@@ -306,18 +306,33 @@ export class SkeletonMesh extends Object3D {
                 //	batcher.setBlendMode(getSourceGLBlendMode(this._gl, blendMode, premultipliedAlpha), getDestGLBlendMode(this._gl, blendMode));
                 //}
 
+                /**
+                 * MODIFIED (2026-10-20, 性能): 只在**纹理真的换了**时才置 `needsUpdate`。
+                 *
+                 * 原实现是每个 slot、每帧都无条件 `batchMaterial.needsUpdate = true`。
+                 * 该标志会把 `material.version++`，three 随即在 `getProgram()` 里重算
+                 * `getProgramCacheKey()`（字符串拼装 + 查表）—— 命中缓存虽不重编译着色器，
+                 * 但每帧仍要重走一遍。6 套骨架 × 每套数十个 slot ⇒ 每帧上百次。
+                 * 旧 profile（1700×750）里该项 self-time 占 3%。
+                 *
+                 * 为什么去掉是安全的：`map` 在 fragment shader 里是**无条件声明**的
+                 * `uniform sampler2D`，不存在 `USE_MAP` 之类的程序变体，换纹理不需要重编译；
+                 * three 每帧在 `setProgram` 里从 `material.uniforms` 现取当前值。
+                 * `needsUpdate` 的真正作用只剩「首次赋值（null → texture）触发一次建程序」，
+                 * 那个分支在下面保留。
+                 */
                 let batchMaterial = <SkeletonMeshMaterial>batch.material;
-                if (batchMaterial.uniforms.map.value == null) {
-                    batchMaterial.uniforms.map.value = texture.texture;
-                }
                 if (batchMaterial.uniforms.map.value != texture.texture) {
-                    batch.end();
-                    batch = this.nextBatch();
-                    batch.begin();
-                    batchMaterial = <SkeletonMeshMaterial>batch.material;
+                    // 首帧（null → texture）就地赋值；换成**另一张**图才需要另开一个 batch
+                    if (batchMaterial.uniforms.map.value != null) {
+                        batch.end();
+                        batch = this.nextBatch();
+                        batch.begin();
+                        batchMaterial = <SkeletonMeshMaterial>batch.material;
+                    }
                     batchMaterial.uniforms.map.value = texture.texture;
+                    batchMaterial.needsUpdate = true;
                 }
-                batchMaterial.needsUpdate = true;
 
                 batch.batch(finalVertices, finalVerticesLength, finalIndices, finalIndicesLength, z);
                 z += zOffset;
